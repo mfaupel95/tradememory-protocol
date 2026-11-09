@@ -168,13 +168,13 @@ def test_middleware_health_exempt_even_when_configured(monkeypatch):
     assert r.status_code == 200
 
 
-def test_middleware_multiple_keys_route_to_different_tenants(monkeypatch):
+def test_middleware_multiple_tenants_fail_closed(monkeypatch):
     monkeypatch.setenv("TRADEMEMORY_API_KEYS", "k1:t1,k2:t2")
     client = TestClient(_app_with_middleware())
     r1 = client.get("/protected", headers={"Authorization": "Bearer k1"})
     r2 = client.get("/protected", headers={"Authorization": "Bearer k2"})
-    assert r1.json()["tenant_id"] == "t1"
-    assert r2.json()["tenant_id"] == "t2"
+    assert r1.status_code == 503
+    assert r2.status_code == 503
 
 
 def test_middleware_rejects_basic_auth(monkeypatch):

@@ -10,14 +10,16 @@ Design goals
   reverse proxy or a future RBAC layer.
 - **Scaffold-only.** Multi-tenant data isolation requires per-row
   `tenant_id` filtering across many queries; v0.5.2 ships the column +
-  identity plumbing, not the full filtering rewrite. See LIMITATIONS.md.
+  identity plumbing, not the full filtering rewrite. Configurations naming
+  more than one tenant fail closed with HTTP 503 on protected routes.
+  Use separate processes and databases per tenant. See LIMITATIONS.md.
 
 Configuration
 -------------
 Set `TRADEMEMORY_API_KEYS` to a comma-separated list of `key:tenant_id`
-pairs. Examples:
+pairs. Multiple keys may name the same tenant:
 
-    TRADEMEMORY_API_KEYS="abc123:acme,def456:bigfund"
+    TRADEMEMORY_API_KEYS="abc123:acme,def456:acme"
 
 A bare key with no tenant uses the literal `"default"` tenant:
 
@@ -42,6 +44,21 @@ from starlette.responses import JSONResponse
 
 API_KEYS_ENV = "TRADEMEMORY_API_KEYS"
 DEFAULT_TENANT = "default"
+
+TENANT_ISOLATION_ERROR = (
+    "Multiple tenants are not supported by this shared data store. "
+    "Use a separate process and database for each tenant."
+)
+
+
+def _require_single_tenant(keys: Dict[str, str]) -> None:
+    """Fail closed until every data access is scoped by tenant.
+
+    Multiple credentials for the same tenant remain supported. Authentication
+    alone must not imply isolation between tenants sharing the global stores.
+    """
+    if len(set(keys.values())) > 1:
+        raise HTTPException(status_code=503, detail=TENANT_ISOLATION_ERROR)
 
 # Paths that bypass auth even when keys are configured. Health checks and
 # OpenAPI introspection must remain reachable for monitors / Swagger.
@@ -137,6 +154,7 @@ async def require_auth(request: Request) -> AuthContext:
     want it without re-declaring the dependency.
     """
     keys = load_api_keys()
+    _require_single_tenant(keys)
     if not keys:
         ctx = AuthContext(
             tenant_id=DEFAULT_TENANT, api_key_prefix=None, is_anonymous=True
@@ -209,6 +227,14 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
                 is_anonymous=True,
             )
             return await call_next(request)
+
+        try:
+            _require_single_tenant(keys)
+        except HTTPException as exc:
+            return JSONResponse(
+                status_code=exc.status_code,
+                content={"detail": exc.detail},
+            )
 
         token = _extract_bearer(request.headers.get("Authorization"))
         if not token:
